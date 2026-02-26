@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { handle } from "hono/vercel";
 
@@ -260,7 +261,7 @@ function generateHeadersForUrl(
             Object.assign(headers, group.customHeaders);
         }
     } else {
-        const origin = `${url.protocol}//${url.hostname}`;
+        const origin = url.origin;
         headers["origin"] = origin;
         headers["referer"] = `${origin}/`;
     }
@@ -273,7 +274,7 @@ const CORS_HEADERS: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
     "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, Range, X-Requested-With, Origin, Accept, Accept-Encoding, Accept-Language, Cache-Control, Pragma, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, Sec-Ch-Ua, Sec-Ch-Ua-Mobile, Sec-Ch-Ua-Platform, Connection",
+        "Content-Type, Authorization, Range, X-Requested-With, Origin, Referer, Accept, Accept-Encoding, Accept-Language, Cache-Control, Pragma, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, Sec-Ch-Ua, Sec-Ch-Ua-Mobile, Sec-Ch-Ua-Platform, Connection",
     "Access-Control-Expose-Headers":
         "Content-Length, Content-Range, Accept-Ranges, Content-Type, Cache-Control, Expires, Vary, ETag, Last-Modified",
     "Access-Control-Max-Age": "86400",
@@ -290,9 +291,18 @@ const PASSTHROUGH_HEADERS = new Set([
     "expires",
     "last-modified",
     "etag",
-    "content-encoding",
     "vary",
 ]);
+
+// Headers to remove from the upstream response before sending to client
+const BLACKLIST_HEADERS = [
+    "vary",
+    "content-encoding",
+    "transfer-encoding",
+    "content-length",
+    "connection",
+    "server",
+];
 
 function resolveUrl(line: string, base: URL): URL {
     try {
@@ -369,46 +379,56 @@ function processM3u8Line(
 }
 
 // ─── Hono app ─────────────────────────────────────────────────────────────────
-const app = new Hono().basePath("/api");
+const app = new Hono();
 
-app.get("/info", (c) => {
-    return c.json({
-        name: "Anime Proxy",
-        version: "1.0.0",
-        description: "High-performance M3U8 and binary proxy for anime streaming.",
-        endpoints: {
-            proxy: {
-                path: "/api/",
-                method: "GET",
-                params: {
-                    url: "Required. The encoded URL to proxy.",
-                    origin: "Optional. Custom Origin header for the upstream request.",
-                    headers: "Optional. JSON string of custom headers.",
-                },
-                description: "Proxies M3U8 manifests (with rewriting) and binary segments.",
-            },
-            info: {
-                path: "/api/info",
-                method: "GET",
-                description: "Returns this information.",
-            },
-        },
-        cors: "Enabled for all origins (*)",
-    }, 200, CORS_HEADERS);
-});
-
+// Forward options to handle preflights
 app.options("*", (c) => c.body(null, 204, CORS_HEADERS));
 
-app.get("/", async (c) => {
-    const targetUrlRaw = c.req.query("url");
-    if (!targetUrlRaw) {
-        return c.json({
-            message: "Anime Proxy is running!",
-            usage: "/api/?url=<encoded_url>",
-            endpoints: "/api/info",
-        }, 200, CORS_HEADERS);
+function handleInfo(c: any) {
+    return c.json({
+        name: "Anime Proxy",
+        version: "1.1.0",
+        description: "High-performance M3U8 and binary proxy for anime streaming.",
+        usage: "/api/?url=<encoded_url>",
+        features: ["M3U8 rewriting", "Relative path redirection", "CORS enabled"],
+        cors: "Enabled for all origins (*)",
+    }, 200, CORS_HEADERS);
+}
+
+app.get("/api/info", handleInfo);
+app.get("/info", handleInfo);
+
+// Main handler for both GET and POST
+app.all("*", async (c) => {
+    const method = c.req.method;
+    if (method !== "GET" && method !== "POST") {
+        return c.text("Method not allowed", 405, CORS_HEADERS);
     }
 
+    const path = c.req.path;
+    const targetUrlRaw = c.req.query("url");
+
+    // ── Handle requests without 'url' param ────────────────────────────
+    if (!targetUrlRaw) {
+        if (path === "/" || path === "/api" || path === "/api/") {
+            return handleInfo(c);
+        }
+
+        // Attempt relative redirection using the last host cookie
+        const lastHost = getCookie(c, "_last_requested");
+        if (lastHost) {
+            const remainingPath = path.startsWith("/api") ? path.slice(4) : path;
+            const separator = remainingPath.startsWith("/") ? "" : "/";
+            const search = c.req.url.split("?")[1];
+            const redirectUrl = `/?url=${encodeURIComponent(lastHost + separator + remainingPath)}${search ? "&" + search : ""
+                }`;
+            return c.redirect(redirectUrl);
+        }
+
+        return c.text("Missing URL parameter", 400, CORS_HEADERS);
+    }
+
+    // ── Validate target URL ─────────────────────────────────────────────
     let targetUrl: URL;
     try {
         targetUrl = new URL(targetUrlRaw);
@@ -418,33 +438,79 @@ app.get("/", async (c) => {
 
     const originParam = c.req.query("origin");
     const headersParam = c.req.query("headers");
+    const jsonParam = c.req.query("json");
 
+    // ── Build upstream request ──────────────────────────────────────────
     const upstreamHeaders = generateHeadersForUrl(targetUrl, originParam);
 
-    if (headersParam) {
-        try {
-            const parsed = JSON.parse(headersParam) as Record<string, string>;
-            for (const [k, v] of Object.entries(parsed)) {
-                upstreamHeaders[k.toLowerCase()] = v;
-            }
-        } catch { /* ignore */ }
-    }
-
+    // Forward client headers (Range, etc.)
     const clientHeaders = c.req.raw.headers;
     for (const h of ["range", "if-range", "if-none-match", "if-modified-since"]) {
         const val = clientHeaders.get(h);
         if (val) upstreamHeaders[h] = val;
     }
 
+    // Add custom headers from query
+    if (headersParam) {
+        try {
+            const parsed = JSON.parse(headersParam);
+            for (const [k, v] of Object.entries(parsed)) {
+                upstreamHeaders[k.toLowerCase()] = String(v);
+            }
+        } catch { /* ignore */ }
+    }
+
+    // Handle POST data
+    let body: any = null;
+    if (method === "POST") {
+        if (jsonParam) {
+            body = jsonParam;
+            upstreamHeaders["content-type"] = "application/json";
+        } else {
+            body = await c.req.arrayBuffer();
+        }
+    }
+
+    // ── Fetch upstream ──────────────────────────────────────────────────
     let upstream: Response;
     try {
         upstream = await fetch(targetUrl.href, {
+            method,
             headers: upstreamHeaders,
-            redirect: "follow",
+            body,
+            redirect: "manual", // Handle redirects manually for Location rewriting
         });
     } catch (err) {
         console.error(`Failed to fetch ${targetUrl.href}:`, err);
         return c.text("Failed to fetch target URL", 502, CORS_HEADERS);
+    }
+
+    // Store the base URL in a cookie to help with subsequent relative requests
+    const urlBase = `${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname.substring(0, targetUrl.pathname.lastIndexOf("/"))}`;
+    setCookie(c, "_last_requested", urlBase, {
+        maxAge: 3600,
+        httpOnly: true,
+        path: "/",
+        sameSite: "Lax",
+    });
+
+    // ── Handle Redirects ────────────────────────────────────────────────
+    if (upstream.status >= 300 && upstream.status < 400) {
+        const location = upstream.headers.get("location");
+        if (location) {
+            const resolvedLocation = resolveUrl(location, targetUrl);
+            const proxiedLocation = `/?url=${encodeURIComponent(resolvedLocation.href)}`;
+            return c.redirect(proxiedLocation, upstream.status as any);
+        }
+    }
+
+    // ── Build Response Headers ──────────────────────────────────────────
+    const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
+    for (const [name, value] of upstream.headers.entries()) {
+        const lowerName = name.toLowerCase();
+        if (!BLACKLIST_HEADERS.includes(lowerName)) {
+            responseHeaders[name] = value;
+        }
     }
 
     const contentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
@@ -454,39 +520,27 @@ app.get("/", async (c) => {
         contentType.includes("application/x-mpegurl");
     const isM3u8ByUrl = targetUrl.pathname.toLowerCase().endsWith(".m3u8");
 
+    // ── M3U8 rewriting path ─────────────────────────────────────────────
     if (isM3u8ByContentType || isM3u8ByUrl) {
-        const body = await upstream.text();
-        const looksLikeM3u8 = body.trimStart().startsWith("#EXTM3U");
+        const textBody = await upstream.text();
+        const looksLikeM3u8 = textBody.trimStart().startsWith("#EXTM3U");
 
         if (isM3u8ByContentType || looksLikeM3u8) {
-            const rewritten = body
+            const rewritten = textBody
                 .split("\n")
                 .map((line) => processM3u8Line(line.replace(/\r$/, ""), targetUrl, originParam))
                 .join("\n");
 
             return c.body(rewritten, upstream.status as ContentfulStatusCode, {
-                ...CORS_HEADERS,
+                ...responseHeaders,
                 "Content-Type": "application/vnd.apple.mpegurl",
                 "Cache-Control": "no-cache, no-store, must-revalidate",
             });
         }
-
-        const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
-        for (const [name, value] of upstream.headers.entries()) {
-            if (PASSTHROUGH_HEADERS.has(name.toLowerCase())) {
-                responseHeaders[name] = value;
-            }
-        }
-        return c.body(body, upstream.status as ContentfulStatusCode, responseHeaders);
+        return c.body(textBody, upstream.status as ContentfulStatusCode, responseHeaders);
     }
 
-    const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
-    for (const [name, value] of upstream.headers.entries()) {
-        if (PASSTHROUGH_HEADERS.has(name.toLowerCase())) {
-            responseHeaders[name] = value;
-        }
-    }
-
+    // ── Passthrough (binary segments, etc.) ─────────────────────────────
     return c.body(upstream.body as ReadableStream, upstream.status as ContentfulStatusCode, responseHeaders);
 });
 
