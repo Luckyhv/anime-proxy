@@ -378,6 +378,114 @@ function processM3u8Line(
     return `/?${q}`;
 }
 
+// ─── Watch Order Helpers ───────────────────────────────────────────────────────
+
+async function getMalIdFromAnilistId(anilistId: number): Promise<number | null> {
+    const query = `
+    query ($id: Int) {
+      Media (id: $id, type: ANIME) {
+        idMal
+      }
+    }
+    `;
+    try {
+        const response = await fetch("https://graphql.anilist.co", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+            },
+            body: JSON.stringify({
+                query,
+                variables: { id: anilistId },
+            }),
+        });
+        const data = await response.json();
+        return data?.data?.Media?.idMal || null;
+    } catch (err) {
+        console.error("AniList API error:", err);
+        return null;
+    }
+}
+
+async function scrapeWatchOrder(malId: number) {
+    const url = `https://chiaki.site/?/tools/watch_order/id/${malId}`;
+    try {
+        const response = await fetch(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        });
+
+        if (!response.ok) return null;
+        const html = await response.text();
+
+        const entries: any[] = [];
+        // Match TR tags that have data-id
+        const trRegex = /<tr[^>]+data-id="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
+        let match;
+
+        while ((match = trRegex.exec(html)) !== null) {
+            const trTag = match[0];
+            const content = match[2];
+
+            // Extract attributes from the tr tag itself
+            const idAttr = trTag.match(/data-id="(\d+)"/);
+            const typeAttr = trTag.match(/data-type="(\d+)"/);
+            const epsAttr = trTag.match(/data-eps="(\d+)"/);
+            const anilistIdAttr = trTag.match(/data-anilist-id="(\d*)"/);
+
+            if (!idAttr || !typeAttr) continue;
+
+            const type = parseInt(typeAttr[1]);
+            // Filter: TV (1) and Movie (3)
+            if (type !== 1 && type !== 3) continue;
+
+            const titleMatch = content.match(/<span class="wo_title">([\s\S]*?)<\/span>/);
+            const secondaryTitleMatch = content.match(/<span class="uk-text-small">([\s\S]*?)<\/span>/);
+            const imageMatch = content.match(/style="background-image:url\('([^']+)'\)"/);
+            const metaMatch = content.match(/<span class="wo_meta">([\s\S]*?)<\/span>/);
+            const ratingMatch = content.match(/<span class="wo_rating">([\s\S]*?)<\/span>/);
+
+            const metaRaw = metaMatch ? metaMatch[1].replace(/<[^>]*>?/gm, '').replace(/\s+/g, ' ').trim() : "";
+            const parts = metaRaw.split('|').map(p => p.trim()).filter(p => p && !p.includes('★'));
+
+            let episodesCount = null;
+            let duration = null;
+            const epInfo = parts[2] || "";
+            if (epInfo.includes('×')) {
+                const [e, d] = epInfo.split('×').map(s => s.trim());
+                episodesCount = e;
+                duration = d;
+            } else if (epInfo) {
+                duration = epInfo;
+            }
+
+            entries.push({
+                malId: parseInt(idAttr[1]),
+                anilistId: anilistIdAttr && anilistIdAttr[1] ? parseInt(anilistIdAttr[1]) : null,
+                title: titleMatch ? titleMatch[1].trim() : "Unknown",
+                secondaryTitle: secondaryTitleMatch ? secondaryTitleMatch[1].trim() : null,
+                type: type === 1 ? "TV" : "Movie",
+                episodes: epsAttr ? parseInt(epsAttr[1]) : 0,
+                image: imageMatch ? `https://chiaki.site/${imageMatch[1]}` : null,
+                metadata: {
+                    date: parts[0] || null,
+                    type: parts[1] || null,
+                    episodes: episodesCount,
+                    duration: duration
+                },
+                rating: ratingMatch ? ratingMatch[1].trim() : null
+            });
+        }
+
+        return entries;
+    } catch (err) {
+        console.error("Scraping error:", err);
+        return null;
+    }
+}
+
 // ─── Hono app ─────────────────────────────────────────────────────────────────
 const app = new Hono();
 
@@ -397,6 +505,36 @@ function handleInfo(c: any) {
 
 app.get("/api/info", handleInfo);
 app.get("/info", handleInfo);
+
+app.get("/api/watch-order", async (c) => {
+    const anilistIdRaw = c.req.query("id");
+    if (!anilistIdRaw) {
+        return c.json({ error: "Missing anilistId parameter" }, 400, CORS_HEADERS);
+    }
+
+    const anilistId = parseInt(anilistIdRaw);
+    if (isNaN(anilistId)) {
+        return c.json({ error: "Invalid anilistId" }, 400, CORS_HEADERS);
+    }
+
+    // 1. Convert AniList ID to MAL ID
+    const malId = await getMalIdFromAnilistId(anilistId);
+    if (!malId) {
+        return c.json({ error: "Could not find MAL ID for this AniList ID" }, 404, CORS_HEADERS);
+    }
+
+    // 2. Scrape watch order from chiaki.site
+    const watchOrder = await scrapeWatchOrder(malId);
+    if (!watchOrder) {
+        return c.json({ error: "Failed to fetch watch order data" }, 502, CORS_HEADERS);
+    }
+
+    // 3. Return clean JSON with caching
+    return c.json(watchOrder, 200, {
+        ...CORS_HEADERS,
+        "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600",
+    });
+});
 
 // Main handler for both GET and POST
 app.all("*", async (c) => {
