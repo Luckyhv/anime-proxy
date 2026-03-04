@@ -651,6 +651,10 @@ app.all("*", async (c) => {
         }
     }
 
+    // Force cache media segments on Vercel Edge to heavily reduce Fast Origin Transfer
+    // Since these are video segments, they are immutable and can be cached long-term.
+    responseHeaders["Cache-Control"] = "public, max-age=31536000, s-maxage=31536000, immutable";
+
     const contentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
     const isM3u8ByContentType =
         contentType.includes("mpegurl") ||

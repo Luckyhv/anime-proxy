@@ -330,6 +330,10 @@ app.get("/", async (c) => {
         }
     }
 
+    // Force cache media segments on Vercel Edge to heavily reduce Fast Origin Transfer
+    // Since these are video segments, they are immutable and can be cached long-term.
+    responseHeaders["Cache-Control"] = "public, max-age=31536000, s-maxage=31536000, immutable";
+
     // Stream the body through directly for maximum performance
     return c.body(upstream.body as ReadableStream, upstream.status as ContentfulStatusCode, responseHeaders);
 });
