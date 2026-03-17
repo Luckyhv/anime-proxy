@@ -4,6 +4,26 @@ import { generateHeadersForUrl } from "./templates";
 
 const app = new Hono();
 
+app.get("/info", (c) => {
+    return c.json({
+        name: "Anime Proxy",
+        version: "1.1.0",
+        description: "High-performance M3U8 and binary proxy for anime streaming on Bun/Railway.",
+        status: "Online",
+        runtime: "Bun",
+    }, 200, CORS_HEADERS);
+});
+
+app.get("/api/info", (c) => {
+    return c.json({
+        name: "Anime Proxy",
+        version: "1.1.0",
+        description: "High-performance M3U8 and binary proxy for anime streaming on Bun/Railway.",
+        status: "Online",
+        runtime: "Bun",
+    }, 200, CORS_HEADERS);
+});
+
 // ─── CORS constants ───────────────────────────────────────────────────────────
 const CORS_HEADERS: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
