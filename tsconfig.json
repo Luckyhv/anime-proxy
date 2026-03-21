@@ -10,7 +10,8 @@
         "outDir": "./dist",
         "rootDir": ".",
         "types": [
-            "bun-types"
+            "bun",
+            "node"
         ],
         "jsx": "react-jsx",
         "jsxImportSource": "hono/jsx"

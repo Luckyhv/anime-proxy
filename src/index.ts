@@ -42,7 +42,7 @@ app.use("*", async (c, next) => {
 app.get("/help", handleDashboard);
 
 app.get("/api/logs", (c) => {
-    const logHtml = logs.length > 0 
+    const logHtml = logs.length > 0
         ? logs.map(l => `<div style="padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.8rem; color: #a5a5cc;">${l}</div>`).join("")
         : `<div style="color: #666; font-style: italic;">No recent activity...</div>`;
     return c.html(logHtml);
@@ -51,7 +51,7 @@ app.get("/api/logs", (c) => {
 app.get("/api/stats", (c) => {
     const uptimeSeconds = Math.floor((Date.now() - start_time) / 1000);
     const avgLatency = requestCount > 0 ? (totalResponseTime / requestCount).toFixed(2) : "0";
-    
+
     return c.html(handleStatsFragment({
         uptime: `${uptimeSeconds}s`,
         requests: requestCount,
@@ -60,6 +60,15 @@ app.get("/api/stats", (c) => {
 });
 
 app.get("/api/status", (c) => {
+    const isJson = c.req.header("Accept")?.includes("application/json");
+    if (isJson) {
+        return c.json({
+            status: "Online",
+            uptime: `${Math.floor((Date.now() - start_time) / 1000)}s`,
+            latency: requestCount > 0 ? (totalResponseTime / requestCount).toFixed(2) + "ms" : "N/A",
+            message: "FAST ASF"
+        }, 200, CORS_HEADERS);
+    }
     return c.html(handleStatusBadge("FAST ASF"));
 });
 
@@ -76,7 +85,51 @@ app.get("/api/info", (c) => {
         avg_latency: `${avgLatency}ms`,
         runtime: "Bun",
         status: "Online",
-        performance: "Extreme"
+        performance: "Extreme",
+        endpoints: {
+            proxy: {
+                path: "/*",
+                method: "ALL",
+                description: "Main proxy route. Expects 'url' parameter.",
+                status: "Operational"
+            },
+            help: {
+                path: "/help",
+                method: "GET",
+                description: "Interactive dashboard and statistics dashboard.",
+                status: "Operational"
+            },
+            watch_order: {
+                path: "/api/watch-order",
+                method: "GET",
+                description: "Scrape watch order from chiaki.site using AniList ID.",
+                status: "Operational"
+            },
+            debug_manifest: {
+                path: "/api/debug-manifest",
+                method: "GET",
+                description: "Analyse M3U8 manifest structure and debug segments.",
+                status: "Operational"
+            },
+            stats: {
+                path: "/api/stats",
+                method: "GET",
+                description: "Real-time performance metrics (HTMX fragment).",
+                status: "Operational"
+            },
+            logs: {
+                path: "/api/logs",
+                method: "GET",
+                description: "Recent proxy request logs (HTMX fragment).",
+                status: "Operational"
+            },
+            status: {
+                path: "/api/status",
+                method: "GET",
+                description: "Live status badge generation.",
+                status: "Operational"
+            }
+        }
     }, 200, CORS_HEADERS);
 });
 

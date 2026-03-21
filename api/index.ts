@@ -327,10 +327,42 @@ function resolveUrl(line: string, base: URL): URL {
     }
 }
 
+function buildProxyQuery(url: URL, originParam?: string, debugEnabled = false): string {
+    const params = new URLSearchParams({
+        url: url.href,
+    });
+
+    if (originParam) {
+        params.set("origin", originParam);
+    }
+
+    if (debugEnabled) {
+        params.set("debug", "1");
+    }
+
+    return params.toString();
+}
+
+function extractManifestDebug(textBody: string) {
+    const lines = textBody.split("\n").map((line) => line.replace(/\r$/, ""));
+    const streamLines = lines.filter((line) => line.startsWith("#EXT-X-STREAM-INF"));
+    const codecs = streamLines
+        .map((line) => line.match(/CODECS="([^"]+)"/)?.[1] ?? null)
+        .filter((value): value is string => Boolean(value));
+
+    return {
+        lineCount: lines.length,
+        variantCount: streamLines.length,
+        codecs: [...new Set(codecs)].slice(0, 8),
+        preview: lines.filter((line) => line.startsWith("#EXT")).slice(0, 8),
+    };
+}
+
 function processM3u8Line(
     line: string,
     scrapeUrl: URL,
-    originParam?: string
+    originParam?: string,
+    debugEnabled = false,
 ): string {
     if (line.length === 0) return "";
 
@@ -343,8 +375,7 @@ function processM3u8Line(
                 if (quotePos !== -1) {
                     const keyUri = line.slice(keyUriStart, quotePos);
                     const resolved = resolveUrl(keyUri, scrapeUrl);
-                    let q = `url=${encodeURIComponent(resolved.href)}`;
-                    if (originParam) q += `&origin=${originParam}`;
+                    const q = buildProxyQuery(resolved, originParam, debugEnabled);
                     return `${line.slice(0, keyUriStart)}/?${q}${line.slice(quotePos)}`;
                 }
             }
@@ -354,8 +385,7 @@ function processM3u8Line(
         if (line.startsWith('#EXT-X-MAP:URI="')) {
             const innerUrl = line.slice(16, line.length - 1);
             const resolved = resolveUrl(innerUrl, scrapeUrl);
-            let q = `url=${encodeURIComponent(resolved.href)}`;
-            if (originParam) q += `&origin=${originParam}`;
+            const q = buildProxyQuery(resolved, originParam, debugEnabled);
             return `#EXT-X-MAP:URI="/?${q}"`;
         }
 
@@ -374,8 +404,7 @@ function processM3u8Line(
                         .replace(/^"|"$/g, "");
                     if (key === "URI" || key === "URL") {
                         const resolved = resolveUrl(value, scrapeUrl);
-                        let q = `url=${encodeURIComponent(resolved.href)}`;
-                        if (originParam) q += `&origin=${originParam}`;
+                        const q = buildProxyQuery(resolved, originParam, debugEnabled);
                         return `${key}="/?${q}"`;
                     }
                     return attr;
@@ -388,8 +417,7 @@ function processM3u8Line(
     }
 
     const resolved = resolveUrl(line, scrapeUrl);
-    let q = `url=${encodeURIComponent(resolved.href)}`;
-    if (originParam) q += `&origin=${encodeURIComponent(originParam)}`;
+    const q = buildProxyQuery(resolved, originParam, debugEnabled);
     return `/?${q}`;
 }
 
@@ -512,9 +540,33 @@ function handleInfo(c: any) {
         name: "Anime Proxy",
         version: "1.1.0",
         description: "High-performance M3U8 and binary proxy for anime streaming.",
-        usage: "/api/?url=<encoded_url>",
-        features: ["M3U8 rewriting", "Relative path redirection", "CORS enabled"],
-        cors: "Enabled for all origins (*)",
+        status: "Online",
+        endpoints: {
+            proxy: {
+                path: "/api",
+                method: "GET | POST",
+                description: "Main proxy route. Expects 'url' parameter.",
+                status: "Operational"
+            },
+            watch_order: {
+                path: "/api/watch-order",
+                method: "GET",
+                description: "Scrape watch order from chiaki.site using AniList ID.",
+                status: "Operational"
+            },
+            debug_manifest: {
+                path: "/api/debug-manifest",
+                method: "GET",
+                description: "Analyse M3U8 manifest structure and debug segments.",
+                status: "Operational"
+            },
+            info: {
+                path: "/api/info",
+                method: "GET",
+                description: "Project metadata and endpoint documentation.",
+                status: "Operational"
+            }
+        }
     }, 200, CORS_HEADERS);
 }
 
@@ -551,6 +603,43 @@ app.get("/api/watch-order", async (c) => {
     });
 });
 
+app.get("/api/debug-manifest", async (c) => {
+    const targetUrlRaw = c.req.query("url");
+    if (!targetUrlRaw) {
+        return c.json({ error: "Missing url parameter" }, 400, CORS_HEADERS);
+    }
+
+    let targetUrl: URL;
+    try {
+        targetUrl = new URL(targetUrlRaw);
+    } catch {
+        return c.json({ error: "Invalid url parameter" }, 400, CORS_HEADERS);
+    }
+
+    const originParam = c.req.query("origin");
+    const upstreamHeaders = generateHeadersForUrl(targetUrl, originParam);
+
+    try {
+        const upstream = await fetch(targetUrl.href, {
+            headers: upstreamHeaders,
+            redirect: "manual",
+        });
+        const contentType = upstream.headers.get("content-type") ?? "";
+        const textBody = await upstream.text();
+
+        return c.json({
+            upstreamUrl: targetUrl.href,
+            origin: originParam ?? null,
+            contentType,
+            status: upstream.status,
+            ...extractManifestDebug(textBody),
+        }, 200, CORS_HEADERS);
+    } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        return c.json({ error: errorMessage }, 502, CORS_HEADERS);
+    }
+});
+
 // Main handler for both GET and POST
 app.all("*", async (c) => {
     const method = c.req.method;
@@ -560,6 +649,8 @@ app.all("*", async (c) => {
 
     const path = c.req.path;
     const targetUrlRaw = c.req.query("url");
+    const originParam = c.req.query("origin");
+    const debugEnabled = c.req.query("debug") === "1";
 
     // ── Handle requests without 'url' param ────────────────────────────
     if (!targetUrlRaw) {
@@ -572,9 +663,8 @@ app.all("*", async (c) => {
         if (lastHost) {
             const remainingPath = path.startsWith("/api") ? path.slice(4) : path;
             const separator = remainingPath.startsWith("/") ? "" : "/";
-            const search = c.req.url.split("?")[1];
-            const redirectUrl = `/?url=${encodeURIComponent(lastHost + separator + remainingPath)}${search ? "&" + search : ""
-                }`;
+            const redirectTarget = new URL(lastHost + separator + remainingPath);
+            const redirectUrl = `/?${buildProxyQuery(redirectTarget, undefined, debugEnabled)}`;
             return c.redirect(redirectUrl);
         }
 
@@ -589,7 +679,6 @@ app.all("*", async (c) => {
         return c.text(`Invalid URL: ${targetUrlRaw}`, 400, CORS_HEADERS);
     }
 
-    const originParam = c.req.query("origin");
     const headersParam = c.req.query("headers");
     const jsonParam = c.req.query("json");
 
