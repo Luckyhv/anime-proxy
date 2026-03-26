@@ -243,6 +243,12 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
         origin: "https://pahe.la",
         referer: "https://pahe.la/",
     },
+    {
+        patterns: [/[a-z]+\d+\.(pro|live|xyz|site|online|wiki)$/i],
+        origin: "https://rapid-cloud.co",
+        referer: "https://rapid-cloud.co/",
+        customHeaders: { "cache-control": "no-cache", pragma: "no-cache" },
+    },
 ];
 
 export function generateHeadersOriginal(
