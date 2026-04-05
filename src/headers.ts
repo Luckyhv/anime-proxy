@@ -151,6 +151,11 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
         referer: "https://animeyy.com/",
     },
     {
+        patterns: [/ninstream\.com$/i],
+        origin: "https://senshi.live",
+        referer: "https://senshi.live/",
+    },
+    {
         patterns: [
             /lightningspark77\.pro$/i,
             /thunderwave48\.xyz$/i,
