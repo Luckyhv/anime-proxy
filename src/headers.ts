@@ -51,6 +51,11 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
         referer: "https://krussdomi.com/",
     },
     {
+        patterns: [/(?:^|\.)owocdn\.top$/i],
+        origin: "https://kwik.cx",
+        referer: "https://kwik.cx/",
+    },
+    {
         patterns: [/\.akamaized\.net$/i],
         origin: "https://players.akamai.com",
         referer: "https://players.akamai.com/",
@@ -69,6 +74,11 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
         patterns: [/(?:^|\.)viddsn\./i, /\.anilike\.cyou$/i, /vidwish\.(?:live|to|com)$/i],
         origin: "https://vidwish.live",
         referer: "https://vidwish.live/",
+    },
+    {
+        patterns: [/(?:^|\.)watching\.onl$/i],
+        origin: "https://megaplay.buzz",
+        referer: "https://megaplay.buzz/",
     },
     {
         patterns: [/(?:^|\.)dotstream\./i, /(?:^|\.)playcloud1\./i],
@@ -154,6 +164,123 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
         patterns: [/ninstream\.com$/i],
         origin: "https://senshi.live",
         referer: "https://senshi.live/",
+    },
+    {
+        patterns: [/video1\.cdnlibs\.org$/i, /cdnlibs\.org$/i],
+        origin: "https://v3.animelib.org",
+        referer: "https://v3.animelib.org/",
+    },
+    {
+        patterns: [/kodik\.info$/i, /kodik\.cc$/i],
+        origin: "https://kodik.info",
+        referer: "https://kodik.info/",
+    },
+    {
+        patterns: [/video\.sibnet\.ru$/i],
+        origin: "https://video.sibnet.ru",
+        referer: "https://video.sibnet.ru/",
+    },
+    {
+        patterns: [/filemoon\.sx$/i, /filemoon\.to$/i, /filemoon\.in$/i],
+        origin: "https://filemoon.sx",
+        referer: "https://filemoon.sx/",
+    },
+    {
+        patterns: [/doodstream\.com$/i, /dood\.wf$/i, /dood\.re$/i, /d0000d\.com$/i],
+        origin: "https://doodstream.com",
+        referer: "https://doodstream.com/",
+    },
+    {
+        patterns: [/streamwish\.to$/i, /streamwish\.com$/i, /swdyu\.com$/i],
+        origin: "https://streamwish.to",
+        referer: "https://streamwish.to/",
+    },
+    {
+        patterns: [/kisskh\.co$/i],
+        origin: "https://kisskh.co",
+        referer: "https://kisskh.co/",
+    },
+    {
+        patterns: [/watchanimeworld\.in$/i],
+        origin: "https://watchanimeworld.in",
+        referer: "https://watchanimeworld.in/",
+    },
+    {
+        patterns: [/animeworld\.ac$/i, /animeworld\.so$/i],
+        origin: "https://animeworld.ac",
+        referer: "https://animeworld.ac/",
+    },
+    {
+        patterns: [/anicrush\.to$/i],
+        origin: "https://anicrush.to",
+        referer: "https://anicrush.to/",
+        customHeaders: { "x-requested-with": "XMLHttpRequest" },
+    },
+    {
+        patterns: [/anikai\.to$/i, /animekai\.to$/i],
+        origin: "https://anikai.to",
+        referer: "https://anikai.to/",
+    },
+    {
+        patterns: [/1movies\.bz$/i],
+        origin: "https://1movies.bz",
+        referer: "https://1movies.bz/",
+    },
+    {
+        patterns: [/monoschinos2\.net$/i, /monoschinos\.net$/i],
+        origin: "https://wvv.monoschinos2.net",
+        referer: "https://wvv.monoschinos2.net/",
+        customHeaders: { "x-requested-with": "XMLHttpRequest" },
+    },
+    {
+        patterns: [/veranimes\.net$/i],
+        origin: "https://wwv.veranimes.net",
+        referer: "https://wwv.veranimes.net/",
+    },
+    {
+        patterns: [/animetoast\.cc$/i],
+        origin: "https://www.animetoast.cc",
+        referer: "https://www.animetoast.cc/",
+    },
+    {
+        patterns: [/animeler\.pw$/i, /play\.animeler\.pw$/i],
+        origin: "https://play.animeler.pw",
+        referer: "https://play.animeler.pw/",
+    },
+    {
+        patterns: [/vidlink\.pro$/i],
+        origin: "https://vidlink.pro",
+        referer: "https://vidlink.pro/",
+    },
+    {
+        patterns: [/poseidonhd2\.co$/i],
+        origin: "https://poseidonhd2.co",
+        referer: "https://poseidonhd2.co/",
+    },
+    {
+        patterns: [/kaa\.lt$/i, /kickass-anime\.ro$/i],
+        origin: "https://kickass-anime.ro",
+        referer: "https://kickass-anime.ro/",
+    },
+    {
+        patterns: [/mangacloud\.org$/i],
+        origin: "https://mangacloud.org",
+        referer: "https://mangacloud.org/",
+    },
+    {
+        patterns: [/mangapub\.com$/i],
+        origin: "https://mangapub.com",
+        referer: "https://mangapub.com/",
+    },
+    {
+        patterns: [/fireani\.me$/i],
+        origin: "https://fireani.me",
+        referer: "https://fireani.me/",
+    },
+    {
+        patterns: [/aniwatchtv\.to$/i],
+        origin: "https://aniwatchtv.to",
+        referer: "https://aniwatchtv.to/",
     },
     {
         patterns: [
@@ -256,11 +383,32 @@ export const DOMAIN_GROUPS: DomainGroup[] = [
     },
 ];
 
+// LRU-style cache for hostname -> domain group lookups (avoids regex scan per request)
+const domainGroupCache = new Map<string, DomainGroup | null>();
+const CACHE_MAX = 1024;
+
+function findDomainGroup(hostname: string): DomainGroup | null {
+    const cached = domainGroupCache.get(hostname);
+    if (cached !== undefined) return cached;
+
+    const group = DOMAIN_GROUPS.find((g) =>
+        g.patterns.some((re) => re.test(hostname))
+    ) ?? null;
+
+    if (domainGroupCache.size >= CACHE_MAX) {
+        // Evict oldest entry
+        const first = domainGroupCache.keys().next().value;
+        if (first !== undefined) domainGroupCache.delete(first);
+    }
+    domainGroupCache.set(hostname, group);
+    return group;
+}
+
 export function generateHeadersOriginal(
     url: URL,
     customOrigin?: string
 ): Record<string, string> {
-    const headers: Record<string, string> = { ...DEFAULT_HEADERS };
+    const headers = Object.assign(Object.create(null), DEFAULT_HEADERS) as Record<string, string>;
 
     if (customOrigin) {
         headers["origin"] = customOrigin;
@@ -270,10 +418,7 @@ export function generateHeadersOriginal(
         return headers;
     }
 
-    const hostname = url.hostname;
-    const group = DOMAIN_GROUPS.find((g) =>
-        g.patterns.some((re) => re.test(hostname))
-    );
+    const group = findDomainGroup(url.hostname);
 
     if (group) {
         headers["origin"] = group.origin;

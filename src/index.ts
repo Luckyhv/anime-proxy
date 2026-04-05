@@ -9,7 +9,39 @@ import {
 } from "./constants";
 import { generateHeadersOriginal } from "./headers";
 import { buildProxyQuery, extractManifestDebug, processM3u8Line, resolveUrl } from "./processor";
-import { handleDashboard, handleStatsFragment, handleStatusBadge } from "./dashboard";
+import { handleDashboard, handleStatsFragment, handleStatusBadge, formatUptime } from "./dashboard";
+
+// ─── URL Decryption (XOR + base64url) ────────────────────────────────────────
+
+const XOR_KEY = process.env.XOR_KEY ?? "";
+
+function decryptUrl(encrypted: string): string | null {
+    try {
+        const b64 = encrypted.replace(/-/g, "+").replace(/_/g, "/");
+        const raw = atob(b64);
+        const key = new TextEncoder().encode(XOR_KEY);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) {
+            bytes[i] = raw.charCodeAt(i) ^ key[i % key.length];
+        }
+        return new TextDecoder().decode(bytes);
+    } catch {
+        return null;
+    }
+}
+
+export function encryptUrl(url: string): string {
+    const data = new TextEncoder().encode(url);
+    const key = new TextEncoder().encode(XOR_KEY);
+    const result = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) {
+        result[i] = data[i] ^ key[i % key.length];
+    }
+    return btoa(String.fromCharCode(...result))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+}
 
 const app = new Hono();
 
@@ -19,21 +51,21 @@ let totalResponseTime = 0;
 const start_time = Date.now();
 const logs: string[] = [];
 
-// Global performance logger & metrics collector
+// Lightweight metrics — only track proxy requests (skip dashboard/static endpoints)
 app.use("*", async (c, next) => {
+    const url = c.req.query("url");
+    if (!url) {
+        await next();
+        return;
+    }
     const start = performance.now();
     await next();
-    const end = performance.now();
     requestCount++;
-    totalResponseTime += (end - start);
+    totalResponseTime += (performance.now() - start);
 
     // Track last few proxy requests for the dashboard
-    const url = c.req.query("url");
-    if (url) {
-        const timestamp = new Date().toLocaleTimeString();
-        logs.unshift(`[${timestamp}] Proxied: ${url.substring(0, 50)}...`);
-        if (logs.length > 5) logs.pop();
-    }
+    logs.unshift(`[${new Date().toLocaleTimeString()}] Proxied: ${url.substring(0, 50)}...`);
+    if (logs.length > 5) logs.pop();
 });
 
 // ─── Help & Info Endpoints (HTMX Enhanced) ────────────────────────────────────
@@ -53,7 +85,7 @@ app.get("/api/stats", (c) => {
     const avgLatency = requestCount > 0 ? (totalResponseTime / requestCount).toFixed(2) : "0";
 
     return c.html(handleStatsFragment({
-        uptime: `${uptimeSeconds}s`,
+        uptime: uptimeSeconds,
         requests: requestCount,
         latency: `${avgLatency}ms`
     }));
@@ -64,7 +96,7 @@ app.get("/api/status", (c) => {
     if (isJson) {
         return c.json({
             status: "Online",
-            uptime: `${Math.floor((Date.now() - start_time) / 1000)}s`,
+            uptime: formatUptime(Math.floor((Date.now() - start_time) / 1000)),
             latency: requestCount > 0 ? (totalResponseTime / requestCount).toFixed(2) + "ms" : "N/A",
             message: "FAST ASF"
         }, 200, CORS_HEADERS);
@@ -80,7 +112,7 @@ app.get("/api/info", (c) => {
         name: "Anime Proxy",
         version: "1.2.0",
         description: "Industrial-grade unified proxy for Railway/Bun.",
-        uptime: `${uptimeSeconds}s`,
+        uptime: formatUptime(uptimeSeconds),
         requests: requestCount,
         avg_latency: `${avgLatency}ms`,
         runtime: "Bun",
@@ -265,12 +297,10 @@ app.get("/api/debug-manifest", async (c) => {
 
 app.all("*", async (c) => {
     const method = c.req.method;
-    if (method !== "GET" && method !== "POST") return c.text("Method not allowed", 405, CORS_HEADERS);
+    if (method !== "GET" && method !== "POST" && method !== "HEAD") return c.text("Method not allowed", 405, CORS_HEADERS);
 
-    const path = c.req.path;
-    const targetUrlRaw = c.req.query("url");
+    const targetUrlRaw = c.req.query("url") ?? (c.req.query("u") ? decryptUrl(c.req.query("u")!) : null);
     const dashboardParam = c.req.query("dashboard");
-    const debugEnabled = c.req.query("debug") === "1";
 
     // Explicit dashboard request
     if (dashboardParam === "true" || dashboardParam === "1") {
@@ -279,6 +309,7 @@ app.all("*", async (c) => {
 
     // Handle dashboard / info at root
     if (!targetUrlRaw) {
+        const path = c.req.path;
         if (path === "/" || path === "/api" || path === "/api/") {
             return handleDashboard(c);
         }
@@ -288,6 +319,7 @@ app.all("*", async (c) => {
         if (lastHost) {
             const remainingPath = path.startsWith("/api") ? path.slice(4) : path;
             const redirectTarget = new URL(lastHost + (remainingPath.startsWith("/") ? "" : "/") + remainingPath);
+            const debugEnabled = c.req.query("debug") === "1";
             const redirectUrl = `/?${buildProxyQuery(redirectTarget, undefined, debugEnabled)}`;
             return c.redirect(redirectUrl);
         }
@@ -298,29 +330,45 @@ app.all("*", async (c) => {
     try { targetUrl = new URL(targetUrlRaw); } catch { return c.text(`Invalid URL: ${targetUrlRaw}`, 400, CORS_HEADERS); }
 
     const originParam = c.req.query("origin");
-    const headersParam = c.req.query("headers");
-    const jsonParam = c.req.query("json");
+    const debugEnabled = c.req.query("debug") === "1";
 
     const upstreamHeaders = generateHeadersOriginal(targetUrl, originParam);
 
     // Forward Range and standard headers
     const clientHeaders = c.req.raw.headers;
-    for (const h of ["range", "if-range", "if-none-match", "if-modified-since", "content-type"]) {
-        const val = clientHeaders.get(h);
-        if (val) upstreamHeaders[h] = val;
-    }
+    const rangeVal = clientHeaders.get("range");
+    if (rangeVal) upstreamHeaders["range"] = rangeVal;
+    const ifRangeVal = clientHeaders.get("if-range");
+    if (ifRangeVal) upstreamHeaders["if-range"] = ifRangeVal;
+    const ifNoneMatchVal = clientHeaders.get("if-none-match");
+    if (ifNoneMatchVal) upstreamHeaders["if-none-match"] = ifNoneMatchVal;
+    const ifModifiedVal = clientHeaders.get("if-modified-since");
+    if (ifModifiedVal) upstreamHeaders["if-modified-since"] = ifModifiedVal;
 
+    const headersParam = c.req.query("headers");
     if (headersParam) {
         try {
             const parsed = JSON.parse(headersParam);
-            for (const [k, v] of Object.entries(parsed)) { upstreamHeaders[k.toLowerCase()] = String(v); }
+            for (const [k, v] of Object.entries(parsed)) {
+                const key = k.toLowerCase();
+                // Never let the client override origin/referer — domain group logic owns those
+                if (key === "origin" || key === "referer") continue;
+                upstreamHeaders[key] = String(v);
+            }
         } catch { /* ignore */ }
     }
 
     let body: any = null;
     if (method === "POST") {
-        body = jsonParam ? jsonParam : await c.req.arrayBuffer();
-        if (jsonParam) upstreamHeaders["content-type"] = "application/json";
+        const jsonParam = c.req.query("json");
+        if (jsonParam) {
+            body = jsonParam;
+            upstreamHeaders["content-type"] = "application/json";
+        } else {
+            const ctVal = clientHeaders.get("content-type");
+            if (ctVal) upstreamHeaders["content-type"] = ctVal;
+            body = await c.req.arrayBuffer();
+        }
     }
 
     let upstream: Response;
@@ -344,45 +392,64 @@ app.all("*", async (c) => {
         return c.text(`Target Fetch Failed: ${errorMsg}`, 502, CORS_HEADERS);
     }
 
-    // Set cookie for relative redirection recovery
-    const urlBase = `${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname.substring(0, targetUrl.pathname.lastIndexOf("/"))}`;
-    setCookie(c, "_last_requested", urlBase, { maxAge: 3600, httpOnly: true, path: "/", sameSite: "Lax" });
-
-    // Handle 3xx Redirects
+    // Handle 3xx Redirects before any other work
     if (upstream.status >= 300 && upstream.status < 400) {
         const location = upstream.headers.get("location");
         if (location) {
             const resolvedLocation = resolveUrl(location, targetUrl);
-            return c.redirect(`/?${buildProxyQuery(resolvedLocation, originParam, debugEnabled)}`, upstream.status as any);
+            const q = buildProxyQuery(resolvedLocation, originParam, debugEnabled, XOR_KEY ? encryptUrl : undefined);
+            return c.redirect(`/?${q}`, upstream.status as any);
         }
     }
 
-    const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
-    for (const [name, value] of upstream.headers.entries()) {
-        if (!BLACKLIST_HEADERS.includes(name.toLowerCase())) { responseHeaders[name] = value; }
+    // Set cookie for relative redirection recovery (only needed for manifest/html responses, skip segments)
+    const pathname = targetUrl.pathname;
+    const dotIdx = pathname.lastIndexOf(".");
+    const ext = dotIdx !== -1 ? pathname.slice(dotIdx + 1).toLowerCase() : "";
+    const isMediaSegment = ext === "ts" || ext === "mp4" || ext === "m4s" || ext === "aac" || ext === "vtt" || ext === "webm";
+
+    if (!isMediaSegment) {
+        const urlBase = `${targetUrl.protocol}//${targetUrl.host}${pathname.substring(0, pathname.lastIndexOf("/"))}`;
+        setCookie(c, "_last_requested", urlBase, { maxAge: 3600, httpOnly: true, path: "/", sameSite: "Lax" });
     }
 
-    // High Performance Caching for Segments
-    responseHeaders["Cache-Control"] = MEDIA_CACHE_CONTROL;
+    const responseHeaders: Record<string, string> = Object.assign({}, CORS_HEADERS);
+    for (const [name, value] of upstream.headers.entries()) {
+        // Header names from fetch are already lowercase in Bun — skip redundant .toLowerCase()
+        if (!BLACKLIST_HEADERS.has(name)) { responseHeaders[name] = value; }
+    }
 
-    const contentType = (upstream.headers.get("content-type") ?? "").toLowerCase();
-    const isM3u8 = contentType.includes("mpegurl") || targetUrl.pathname.toLowerCase().endsWith(".m3u8");
+    if (isMediaSegment) {
+        responseHeaders["Cache-Control"] = MEDIA_CACHE_CONTROL;
+    }
+
+    const contentType = upstream.headers.get("content-type") ?? "";
+    const isM3u8 = contentType.includes("mpegurl") || pathname.endsWith(".m3u8") || pathname.endsWith(".M3U8");
 
     if (isM3u8) {
         try {
             const textBody = await upstream.text();
-            if (!textBody || textBody.length === 0) {
+            if (!textBody) {
                 return c.body(null, upstream.status as ContentfulStatusCode, responseHeaders);
             }
 
             if (textBody.trimStart().startsWith("#EXTM3U")) {
-                const debugInfo = extractManifestDebug(textBody);
-                const rewritten = textBody
-                    .split("\n")
-                    .map((line) => processM3u8Line(line.replace(/\r$/, ""), targetUrl, originParam, debugEnabled))
-                    .join("\n");
+                const debugInfo = debugEnabled ? extractManifestDebug(textBody) : null;
 
-                if (debugEnabled) {
+                // Build rewritten manifest in one pass without intermediate array
+                let rewritten = "";
+                let start = 0;
+                const len = textBody.length;
+                while (start < len) {
+                    let end = textBody.indexOf("\n", start);
+                    if (end === -1) end = len;
+                    const lineEnd = end > start && textBody[end - 1] === "\r" ? end - 1 : end;
+                    if (rewritten.length > 0) rewritten += "\n";
+                    rewritten += processM3u8Line(textBody.slice(start, lineEnd), targetUrl, originParam, debugEnabled, XOR_KEY ? encryptUrl : undefined);
+                    start = end + 1;
+                }
+
+                if (debugEnabled && debugInfo) {
                     responseHeaders["X-Proxy-Debug-Upstream"] = targetUrl.href.slice(0, 200);
                     responseHeaders["X-Proxy-Debug-Variants"] = String(debugInfo.variantCount);
                     responseHeaders["X-Proxy-Debug-Codecs"] = debugInfo.codecs.join(" | ").slice(0, 200);

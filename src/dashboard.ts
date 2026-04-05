@@ -511,15 +511,35 @@ export function handleDashboard(c: any) {
     return c.html(DASHBOARD_HTML, 200, CORS_HEADERS);
 }
 
-export function handleStatsFragment(stats: { uptime: string, requests: number, latency: string }) {
+/**
+ * Beautifies uptime seconds into a human-readable string (Hh Mm Ss).
+ */
+export function formatUptime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+
+    let result = "";
+    if (h > 0) result += `${h}h `;
+    if (m > 0 || h > 0) result += `${m}m `;
+    result += `${s}s`;
+    
+    return result.trim();
+}
+
+export function handleStatsFragment(stats: { uptime: number | string, requests: number, latency: string }) {
+    const displayUptime = typeof stats.uptime === "number" ? formatUptime(stats.uptime) : stats.uptime;
+    
     return `
         <div class="stat-item">
             <span class="stat-value">${stats.requests}</span>
-            <span class="stat-label">Total Requests</span>
+            <span class="stat-label">Requests</span>
         </div>
         <div class="stat-item">
-            <span class="stat-value">${stats.uptime}</span>
-            <span class="stat-label">Server Uptime</span>
+            <span class="stat-value">${displayUptime}</span>
+            <span class="stat-label">Uptime</span>
         </div>
         <div class="stat-item">
             <span class="stat-value">${stats.latency}</span>

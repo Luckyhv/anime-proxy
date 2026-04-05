@@ -36,7 +36,7 @@ export const PASSTHROUGH_HEADERS = new Set([
     "vary",
 ]);
 
-export const BLACKLIST_HEADERS = [
+export const BLACKLIST_HEADERS = new Set([
     "alt-svc",
     "cf-cache-status",
     "cf-ray",
@@ -65,6 +65,6 @@ export const BLACKLIST_HEADERS = [
     "access-control-expose-headers",
     "access-control-max-age",
     "access-control-allow-credentials",
-];
+]);
 
 export const MEDIA_CACHE_CONTROL = "public, max-age=31536000, s-maxage=31536000, immutable";
